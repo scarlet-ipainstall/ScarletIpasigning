@@ -10,7 +10,7 @@
 <body>
 <main class="card">
   <div class="logo">Scarlet IPA Signer</div>
-  <div class="sub">Re-sign an IPA with your own Apple signing certificate.</div>
+  <div class="sub">Re-sign an IPA and create a reusable iOS direct-install link.</div>
   <form id="form">
     <div class="row"><label for="ipa">IPA file</label><input id="ipa" name="ipa" type="file" accept=".ipa,application/octet-stream" required></div>
     <div class="row"><label for="p12">P12 certificate</label><input id="p12" name="p12" type="file" accept=".p12,.pfx,application/x-pkcs12" required></div>
@@ -25,7 +25,7 @@
     <a id="install" class="action install">Install Directly on iPhone/iPad</a>
     <a id="manifest" class="action">View manifest.plist</a>
   </div>
-  <div class="small">Your P12, password, provisioning profile, and IPA are sent to this signing server only for the signing request. Temporary signing inputs are deleted after processing. Signed IPAs and manifests expire automatically. Only use certificates and apps you are authorized to sign and distribute.</div>
+  <div class="small">Signing inputs are temporary. The completed IPA and manifest are stored in your configured Firebase Storage bucket, so the generated direct-install link can be used repeatedly until you remove or replace the stored files. Only use certificates and apps you are authorized to sign and distribute.</div>
 </main>
 <script>
 const form=document.getElementById('form'),status=document.getElementById('status'),download=document.getElementById('download'),install=document.getElementById('install'),manifest=document.getElementById('manifest'),button=document.getElementById('submit');

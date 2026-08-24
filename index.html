@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Scarlet IPA Signer</title>
   <style>
-    :root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#0b0d12;color:#f5f7fb;min-height:100vh;display:grid;place-items:center;padding:20px}.card{width:min(680px,100%);background:#151923;border:1px solid #282e3d;border-radius:22px;padding:28px;box-shadow:0 20px 70px #0008}.logo{font-size:28px;font-weight:800;margin-bottom:6px}.sub{color:#9da6b8;margin-bottom:24px}.row{display:grid;gap:8px;margin:16px 0}label{font-weight:650}.hint{font-size:12px;color:#8791a5}input,button{width:100%;border-radius:12px;border:1px solid #303748;background:#0e1118;color:#fff;padding:13px;font-size:15px}input[type=file]{padding:10px}button{border:0;background:#fff;color:#111827;font-weight:800;cursor:pointer;margin-top:10px}button:disabled{opacity:.5;cursor:not-allowed}.status{margin-top:18px;padding:14px;border-radius:12px;background:#0e1118;white-space:pre-wrap;display:none}.download{display:none;margin-top:12px;text-decoration:none;text-align:center;background:#fff;color:#111827;border-radius:12px;padding:13px;font-weight:800}.small{font-size:12px;color:#7f899d;margin-top:18px;line-height:1.5}.check{display:flex;gap:10px;align-items:flex-start;font-size:13px;color:#b8c0cf}.check input{width:auto;margin-top:3px}.error{color:#ff8f9c}.ok{color:#8ff0b0}</style>
+    :root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#0b0d12;color:#f5f7fb;min-height:100vh;display:grid;place-items:center;padding:20px}.card{width:min(680px,100%);background:#151923;border:1px solid #282e3d;border-radius:22px;padding:28px;box-shadow:0 20px 70px #0008}.logo{font-size:28px;font-weight:800;margin-bottom:6px}.sub{color:#9da6b8;margin-bottom:24px}.row{display:grid;gap:8px;margin:16px 0}label{font-weight:650}.hint{font-size:12px;color:#8791a5}input,button{width:100%;border-radius:12px;border:1px solid #303748;background:#0e1118;color:#fff;padding:13px;font-size:15px}input[type=file]{padding:10px}button{border:0;background:#fff;color:#111827;font-weight:800;cursor:pointer;margin-top:10px}button:disabled{opacity:.5;cursor:not-allowed}.status{margin-top:18px;padding:14px;border-radius:12px;background:#0e1118;white-space:pre-wrap;display:none}.actions{display:grid;gap:10px;margin-top:12px}.action{display:none;text-decoration:none;text-align:center;border-radius:12px;padding:13px;font-weight:800;background:#fff;color:#111827}.install{background:#8b5cf6;color:#fff}.small{font-size:12px;color:#7f899d;margin-top:18px;line-height:1.5}.check{display:flex;gap:10px;align-items:flex-start;font-size:13px;color:#b8c0cf}.check input{width:auto;margin-top:3px}.error{color:#ff8f9c}.ok{color:#8ff0b0}</style>
 </head>
 <body>
 <main class="card">
@@ -20,12 +20,16 @@
     <button id="submit" type="submit">Sign IPA</button>
   </form>
   <div id="status" class="status"></div>
-  <a id="download" class="download">Download signed IPA</a>
-  <div class="small">Your P12, password, provisioning profile, and IPA are sent to the configured signing server only for the signing request and are deleted from the temporary workspace afterward. Do not use a signing server you do not trust with your private certificate.</div>
+  <div class="actions">
+    <a id="download" class="action">Download signed IPA</a>
+    <a id="install" class="action install">Install Directly on iPhone/iPad</a>
+    <a id="manifest" class="action">View manifest.plist</a>
+  </div>
+  <div class="small">Your P12, password, provisioning profile, and IPA are sent to this signing server only for the signing request. Temporary signing inputs are deleted after processing. Signed IPAs and manifests expire automatically. Only use certificates and apps you are authorized to sign and distribute.</div>
 </main>
 <script>
-const form=document.getElementById('form'),status=document.getElementById('status'),download=document.getElementById('download'),button=document.getElementById('submit');
-form.addEventListener('submit',async e=>{e.preventDefault();status.style.display='block';status.className='status';status.textContent='Signing…';download.style.display='none';button.disabled=true;try{const r=await fetch('/api/sign',{method:'POST',body:new FormData(form)});const data=await r.json();if(!r.ok)throw new Error(data.error||'Signing failed');status.className='status ok';status.textContent=data.message||'Signing completed.';download.href=data.downloadUrl;download.textContent='Download '+(data.filename||'signed.ipa');download.style.display='block'}catch(err){status.className='status error';status.textContent=err.message}finally{button.disabled=false}});
+const form=document.getElementById('form'),status=document.getElementById('status'),download=document.getElementById('download'),install=document.getElementById('install'),manifest=document.getElementById('manifest'),button=document.getElementById('submit');
+form.addEventListener('submit',async e=>{e.preventDefault();status.style.display='block';status.className='status';status.textContent='Signing…';[download,install,manifest].forEach(x=>x.style.display='none');button.disabled=true;try{const r=await fetch('/api/sign',{method:'POST',body:new FormData(form)});const data=await r.json();if(!r.ok)throw new Error(data.error||'Signing failed');status.className='status ok';status.textContent=data.message||'Signing completed.';download.href=data.downloadUrl;download.textContent='Download '+(data.filename||'signed.ipa');install.href=data.installUrl;manifest.href=data.manifestUrl;download.style.display='block';install.style.display='block';manifest.style.display='block'}catch(err){status.className='status error';status.textContent=err.message}finally{button.disabled=false}});
 </script>
 </body>
 </html>

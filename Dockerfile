@@ -1,6 +1,6 @@
 FROM node:22-bookworm
 
-RUN apt-get update && apt-get install -y --no-install-recommends git g++ make pkg-config libssl-dev ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends git g++ make pkg-config libssl-dev ca-certificates unzip && rm -rf /var/lib/apt/lists/*
 RUN git clone --depth 1 https://github.com/zhlynn/zsign.git /tmp/zsign-src \
     && make -C /tmp/zsign-src/build/linux clean \
     && make -C /tmp/zsign-src/build/linux \

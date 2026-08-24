@@ -9,7 +9,7 @@ const { spawn, execFile } = require('child_process');
 const { promisify } = require('util');
 const bplistParser = require('bplist-parser');
 const plist = require('plist');
-const admin = require('firebase-admin');
+const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
 
 const execFileAsync = promisify(execFile);
 const app = express();
@@ -19,69 +19,65 @@ const upload = multer({ dest: os.tmpdir(), limits: { fileSize: MAX_FILE, files: 
 
 app.set('trust proxy', 1);
 app.use(express.static(path.join(__dirname)));
-app.get('/health', (_req, res) => res.json({ ok: true, persistentStorage: firebaseReady }));
 
-let bucket = null;
-let firebaseReady = false;
+let r2Client = null;
+let r2Ready = false;
 
-function initFirebase() {
-  if (firebaseReady) return;
-  const json = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
-  const bucketName = process.env.FIREBASE_STORAGE_BUCKET;
-  if (!json || !bucketName) return;
+function initR2() {
+  if (r2Ready) return;
+  const accountId = process.env.R2_ACCOUNT_ID;
+  const accessKeyId = process.env.R2_ACCESS_KEY_ID;
+  const secretAccessKey = process.env.R2_SECRET_ACCESS_KEY;
+  const bucketName = process.env.R2_BUCKET_NAME;
+  const publicBaseUrl = process.env.R2_PUBLIC_BASE_URL;
 
-  let serviceAccount;
-  try {
-    serviceAccount = JSON.parse(json);
-  } catch (e) {
-    throw new Error('FIREBASE_SERVICE_ACCOUNT_JSON is not valid JSON.');
-  }
+  if (!accountId || !accessKeyId || !secretAccessKey || !bucketName || !publicBaseUrl) return;
 
-  if (!admin.apps.length) {
-    admin.initializeApp({ credential: admin.credential.cert(serviceAccount), storageBucket: bucketName });
-  }
-  bucket = admin.storage().bucket();
-  firebaseReady = true;
+  r2Client = new S3Client({
+    region: 'auto',
+    endpoint: `https://${accountId}.r2.cloudflarestorage.com`,
+    credentials: { accessKeyId, secretAccessKey }
+  });
+  r2Ready = true;
 }
 
-function requireFirebase() {
-  initFirebase();
-  if (!firebaseReady) {
-    throw new Error('Persistent storage is not configured. Add FIREBASE_SERVICE_ACCOUNT_JSON and FIREBASE_STORAGE_BUCKET in Render Environment Variables.');
+function requireR2() {
+  initR2();
+  if (!r2Ready) {
+    throw new Error('Persistent storage is not configured. Add R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET_NAME, and R2_PUBLIC_BASE_URL in Render Environment Variables.');
   }
 }
 
-function firebaseDownloadUrl(objectPath, token) {
-  return `https://firebasestorage.googleapis.com/v0/b/${encodeURIComponent(process.env.FIREBASE_STORAGE_BUCKET)}/o/${encodeURIComponent(objectPath)}?alt=media&token=${encodeURIComponent(token)}`;
+function publicObjectUrl(objectPath) {
+  const base = String(process.env.R2_PUBLIC_BASE_URL).replace(/\/$/, '');
+  return `${base}/${objectPath.split('/').map(encodeURIComponent).join('/')}`;
 }
 
 async function uploadPersistent(localPath, objectPath, contentType) {
-  requireFirebase();
-  const token = crypto.randomUUID();
-  const file = bucket.file(objectPath);
-  await file.save(await fsp.readFile(localPath), {
-    resumable: false,
-    metadata: {
-      contentType,
-      metadata: { firebaseStorageDownloadTokens: token }
-    }
-  });
-  return firebaseDownloadUrl(objectPath, token);
+  requireR2();
+  await r2Client.send(new PutObjectCommand({
+    Bucket: process.env.R2_BUCKET_NAME,
+    Key: objectPath,
+    Body: await fsp.readFile(localPath),
+    ContentType: contentType,
+    CacheControl: 'public, max-age=31536000, immutable'
+  }));
+  return publicObjectUrl(objectPath);
 }
 
 async function uploadTextPersistent(text, objectPath, contentType) {
-  requireFirebase();
-  const token = crypto.randomUUID();
-  const file = bucket.file(objectPath);
-  await file.save(Buffer.from(text, 'utf8'), {
-    resumable: false,
-    metadata: {
-      contentType,
-      metadata: { firebaseStorageDownloadTokens: token }
-    }
-  });
-  return firebaseDownloadUrl(objectPath, token);
+  requireR2();
+  await r2Client.send(new PutObjectCommand({
+    Bucket: process.env.R2_BUCKET_NAME,
+    Key: objectPath,
+    Body: Buffer.from(text, 'utf8'),
+    ContentType: contentType,
+    CacheControl: 'public, max-age=31536000, immutable'
+  }));
+  return publicObjectUrl(objectPath);
 }
+
+app.get('/health', (_req, res) => res.json({ ok: true, persistentStorage: r2Ready || Boolean(process.env.R2_BUCKET_NAME) }));
 
 function runZsign(args, cwd) {
   return new Promise((resolve, reject) => {
@@ -104,10 +100,8 @@ function safeName(name, fallback) {
   return path.basename(name || fallback).replace(/[^a-zA-Z0-9._-]/g, '_');
 }
 
-function safeId(id) { return /^[a-f0-9]{36}$/.test(id); }
-
 function xmlEscape(value) {
-  return String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;');
+  return String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\"/g, '&quot;').replace(/'/g, '&apos;');
 }
 
 async function readAppInfo(ipaPath) {
@@ -159,9 +153,9 @@ app.post('/api/sign', upload.fields([
     await runZsign(args, work);
 
     const meta = await readAppInfo(output);
-    requireFirebase();
+    requireR2();
 
-    const ipaObject = `signed-ipas/${jobId}/${safeName(files.ipa[0].originalname, 'signed')}`;
+    const ipaObject = `signed-ipas/${jobId}/${safeName(files.ipa[0].originalname, 'signed.ipa')}`;
     const ipaUrl = await uploadPersistent(output, ipaObject, 'application/octet-stream');
     const manifest = manifestXml(meta, ipaUrl);
     const manifestObject = `manifests/${jobId}/manifest.plist`;
@@ -171,7 +165,7 @@ app.post('/api/sign', upload.fields([
     await removeTree(work);
     res.json({
       ok: true,
-      message: 'IPA signed and permanently uploaded to Firebase Storage.',
+      message: 'IPA signed and permanently uploaded to Cloudflare R2.',
       filename: safeName(files.ipa[0].originalname, 'signed.ipa'),
       downloadUrl: ipaUrl,
       manifestUrl,

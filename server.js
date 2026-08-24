@@ -9,27 +9,83 @@ const { spawn, execFile } = require('child_process');
 const { promisify } = require('util');
 const bplistParser = require('bplist-parser');
 const plist = require('plist');
+const admin = require('firebase-admin');
 
 const execFileAsync = promisify(execFile);
 const app = express();
 const PORT = process.env.PORT || 10000;
 const MAX_FILE = 1024 * 1024 * 1024; // 1 GiB
-const RETENTION_MS = 15 * 60 * 1000;
-const upload = multer({
-  dest: os.tmpdir(),
-  limits: { fileSize: MAX_FILE, files: 3 }
-});
+const upload = multer({ dest: os.tmpdir(), limits: { fileSize: MAX_FILE, files: 3 } });
 
 app.set('trust proxy', 1);
 app.use(express.static(path.join(__dirname)));
-app.get('/health', (_req, res) => res.json({ ok: true }));
+app.get('/health', (_req, res) => res.json({ ok: true, persistentStorage: firebaseReady }));
+
+let bucket = null;
+let firebaseReady = false;
+
+function initFirebase() {
+  if (firebaseReady) return;
+  const json = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
+  const bucketName = process.env.FIREBASE_STORAGE_BUCKET;
+  if (!json || !bucketName) return;
+
+  let serviceAccount;
+  try {
+    serviceAccount = JSON.parse(json);
+  } catch (e) {
+    throw new Error('FIREBASE_SERVICE_ACCOUNT_JSON is not valid JSON.');
+  }
+
+  if (!admin.apps.length) {
+    admin.initializeApp({ credential: admin.credential.cert(serviceAccount), storageBucket: bucketName });
+  }
+  bucket = admin.storage().bucket();
+  firebaseReady = true;
+}
+
+function requireFirebase() {
+  initFirebase();
+  if (!firebaseReady) {
+    throw new Error('Persistent storage is not configured. Add FIREBASE_SERVICE_ACCOUNT_JSON and FIREBASE_STORAGE_BUCKET in Render Environment Variables.');
+  }
+}
+
+function firebaseDownloadUrl(objectPath, token) {
+  return `https://firebasestorage.googleapis.com/v0/b/${encodeURIComponent(process.env.FIREBASE_STORAGE_BUCKET)}/o/${encodeURIComponent(objectPath)}?alt=media&token=${encodeURIComponent(token)}`;
+}
+
+async function uploadPersistent(localPath, objectPath, contentType) {
+  requireFirebase();
+  const token = crypto.randomUUID();
+  const file = bucket.file(objectPath);
+  await file.save(await fsp.readFile(localPath), {
+    resumable: false,
+    metadata: {
+      contentType,
+      metadata: { firebaseStorageDownloadTokens: token }
+    }
+  });
+  return firebaseDownloadUrl(objectPath, token);
+}
+
+async function uploadTextPersistent(text, objectPath, contentType) {
+  requireFirebase();
+  const token = crypto.randomUUID();
+  const file = bucket.file(objectPath);
+  await file.save(Buffer.from(text, 'utf8'), {
+    resumable: false,
+    metadata: {
+      contentType,
+      metadata: { firebaseStorageDownloadTokens: token }
+    }
+  });
+  return firebaseDownloadUrl(objectPath, token);
+}
 
 function runZsign(args, cwd) {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.env.ZSIGN_PATH || '/opt/zsign/zsign', args, {
-      cwd,
-      stdio: ['ignore', 'pipe', 'pipe']
-    });
+    const child = spawn(process.env.ZSIGN_PATH || '/opt/zsign/zsign', args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '', stderr = '';
     child.stdout.on('data', d => stdout += d);
     child.stderr.on('data', d => stderr += d);
@@ -48,9 +104,7 @@ function safeName(name, fallback) {
   return path.basename(name || fallback).replace(/[^a-zA-Z0-9._-]/g, '_');
 }
 
-function safeId(id) {
-  return /^[a-f0-9]{36}$/.test(id);
-}
+function safeId(id) { return /^[a-f0-9]{36}$/.test(id); }
 
 function xmlEscape(value) {
   return String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;');
@@ -60,19 +114,9 @@ async function readAppInfo(ipaPath) {
   const listing = await execFileAsync('unzip', ['-Z1', ipaPath], { maxBuffer: 4 * 1024 * 1024 });
   const infoPath = String(listing.stdout).split(/\r?\n/).find(p => /^Payload\/[^/]+\.app\/Info\.plist$/.test(p));
   if (!infoPath) throw new Error('Could not find Payload/*.app/Info.plist inside the IPA.');
-
-  const extracted = await execFileAsync('unzip', ['-p', ipaPath, infoPath], {
-    encoding: 'buffer',
-    maxBuffer: 10 * 1024 * 1024
-  });
+  const extracted = await execFileAsync('unzip', ['-p', ipaPath, infoPath], { encoding: 'buffer', maxBuffer: 10 * 1024 * 1024 });
   const buffer = Buffer.isBuffer(extracted.stdout) ? extracted.stdout : Buffer.from(extracted.stdout);
-  let info;
-  if (buffer.subarray(0, 6).toString() === 'bplist') {
-    info = bplistParser.parseBuffer(buffer)[0];
-  } else {
-    info = plist.parse(buffer.toString('utf8'));
-  }
-
+  const info = buffer.subarray(0, 6).toString() === 'bplist' ? bplistParser.parseBuffer(buffer)[0] : plist.parse(buffer.toString('utf8'));
   const bundleId = info.CFBundleIdentifier;
   if (!bundleId) throw new Error('The IPA does not contain a CFBundleIdentifier.');
   return {
@@ -83,22 +127,7 @@ async function readAppInfo(ipaPath) {
 }
 
 function manifestXml(meta, ipaUrl) {
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-<key>items</key><array><dict>
-<key>assets</key><array><dict>
-<key>kind</key><string>software-package</string>
-<key>url</key><string>${xmlEscape(ipaUrl)}</string>
-</dict></array>
-<key>metadata</key><dict>
-<key>bundle-identifier</key><string>${xmlEscape(meta.bundleIdentifier)}</string>
-<key>bundle-version</key><string>${xmlEscape(meta.bundleVersion)}</string>
-<key>kind</key><string>software</string>
-<key>title</key><string>${xmlEscape(meta.title)}</string>
-</dict>
-</dict></array>
-</dict></plist>`;
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict>\n<key>items</key><array><dict>\n<key>assets</key><array><dict>\n<key>kind</key><string>software-package</string>\n<key>url</key><string>${xmlEscape(ipaUrl)}</string>\n</dict></array>\n<key>metadata</key><dict>\n<key>bundle-identifier</key><string>${xmlEscape(meta.bundleIdentifier)}</string>\n<key>bundle-version</key><string>${xmlEscape(meta.bundleVersion)}</string>\n<key>kind</key><string>software</string>\n<key>title</key><string>${xmlEscape(meta.title)}</string>\n</dict>\n</dict></array>\n</dict></plist>`;
 }
 
 app.post('/api/sign', upload.fields([
@@ -107,23 +136,17 @@ app.post('/api/sign', upload.fields([
   { name: 'prov', maxCount: 1 }
 ]), async (req, res) => {
   const files = req.files || {};
-  if (!files.ipa?.[0] || !files.p12?.[0] || !files.prov?.[0]) {
-    return res.status(400).json({ error: 'IPA, P12, and provisioning profile are required.' });
-  }
+  if (!files.ipa?.[0] || !files.p12?.[0] || !files.prov?.[0]) return res.status(400).json({ error: 'IPA, P12, and provisioning profile are required.' });
   const password = String(req.body.password || '');
   if (!password) return res.status(400).json({ error: 'P12 password is required.' });
 
-  const jobId = crypto.randomBytes(18).toString('hex');
+  const jobId = crypto.randomUUID();
   const work = path.join(os.tmpdir(), `scarlet-sign-${jobId}`);
-  const outDir = path.join(os.tmpdir(), 'scarlet-signed');
+  const output = path.join(work, `${jobId}-signed.ipa`);
   await fsp.mkdir(work, { recursive: true });
-  await fsp.mkdir(outDir, { recursive: true });
   const ipa = path.join(work, safeName(files.ipa[0].originalname, 'input.ipa'));
   const p12 = path.join(work, safeName(files.p12[0].originalname, 'certificate.p12'));
   const prov = path.join(work, safeName(files.prov[0].originalname, 'profile.mobileprovision'));
-  const output = path.join(outDir, `${jobId}-signed.ipa`);
-  const metadataFile = path.join(outDir, `${jobId}.json`);
-  const cleanupInputs = async () => { await removeTree(work); };
 
   try {
     await fsp.rename(files.ipa[0].path, ipa);
@@ -136,58 +159,28 @@ app.post('/api/sign', upload.fields([
     await runZsign(args, work);
 
     const meta = await readAppInfo(output);
-    await fsp.writeFile(metadataFile, JSON.stringify(meta), 'utf8');
-    await cleanupInputs();
+    requireFirebase();
 
-    const base = `${req.protocol}://${req.get('host')}`;
+    const ipaObject = `signed-ipas/${jobId}/${safeName(files.ipa[0].originalname, 'signed')}`;
+    const ipaUrl = await uploadPersistent(output, ipaObject, 'application/octet-stream');
+    const manifest = manifestXml(meta, ipaUrl);
+    const manifestObject = `manifests/${jobId}/manifest.plist`;
+    const manifestUrl = await uploadTextPersistent(manifest, manifestObject, 'application/xml');
+    const installUrl = `itms-services://?action=download-manifest&url=${encodeURIComponent(manifestUrl)}`;
+
+    await removeTree(work);
     res.json({
       ok: true,
-      message: 'IPA signed successfully.',
-      filename: 'signed.ipa',
-      downloadUrl: `${base}/download/${jobId}`,
-      manifestUrl: `${base}/manifest/${jobId}.plist`,
-      installUrl: `itms-services://?action=download-manifest&url=${encodeURIComponent(`${base}/manifest/${jobId}.plist`)}`
+      message: 'IPA signed and permanently uploaded to Firebase Storage.',
+      filename: safeName(files.ipa[0].originalname, 'signed.ipa'),
+      downloadUrl: ipaUrl,
+      manifestUrl,
+      installUrl,
+      persistent: true
     });
-
-    setTimeout(async () => {
-      try { await fsp.unlink(output); } catch {}
-      try { await fsp.unlink(metadataFile); } catch {}
-    }, RETENTION_MS);
   } catch (err) {
-    await cleanupInputs();
-    try { await fsp.unlink(output); } catch {}
-    try { await fsp.unlink(metadataFile); } catch {}
+    await removeTree(work);
     res.status(500).json({ error: `Signing failed: ${err.message}` });
-  }
-});
-
-app.get('/download/:id', async (req, res) => {
-  if (!safeId(req.params.id)) return res.status(400).send('Invalid download id');
-  const file = path.join(os.tmpdir(), 'scarlet-signed', `${req.params.id}-signed.ipa`);
-  try {
-    await fsp.access(file);
-    res.download(file, 'signed.ipa', async () => {
-      try { await fsp.unlink(file); } catch {}
-      try { await fsp.unlink(path.join(os.tmpdir(), 'scarlet-signed', `${req.params.id}.json`)); } catch {}
-    });
-  } catch {
-    res.status(404).send('This signed IPA has expired or does not exist.');
-  }
-});
-
-app.get('/manifest/:id.plist', async (req, res) => {
-  if (!safeId(req.params.id)) return res.status(400).type('text/plain').send('Invalid manifest id');
-  const dir = path.join(os.tmpdir(), 'scarlet-signed');
-  const file = path.join(dir, `${req.params.id}-signed.ipa`);
-  const metadataFile = path.join(dir, `${req.params.id}.json`);
-  try {
-    await fsp.access(file);
-    const meta = JSON.parse(await fsp.readFile(metadataFile, 'utf8'));
-    const base = `${req.protocol}://${req.get('host')}`;
-    const xml = manifestXml(meta, `${base}/download/${req.params.id}`);
-    res.type('application/xml').send(xml);
-  } catch {
-    res.status(404).type('text/plain').send('This manifest has expired or does not exist.');
   }
 });
 

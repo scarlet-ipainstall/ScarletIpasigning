@@ -1,0 +1,10 @@
+node_modules/
+.env
+*.ipa
+*.p12
+*.pfx
+*.mobileprovision
+*.pem
+*.key
+*.cer
+.DS_Store
